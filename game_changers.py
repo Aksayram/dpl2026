@@ -8,6 +8,7 @@ Run: streamlit run game_changers.py
 """
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -16,8 +17,20 @@ st.set_page_config(page_title="Game Changers | DPL 2026", layout="wide", page_ic
 
 DATA_FILE = Path(__file__).parent / "Data_Premier_League_Prelims_Dataset.csv"
 PHASES = ['Powerplay (1–6)', 'Middle (7–16)', 'Death (17–20)']
-USE_COLS = ['p_match', 'inns', 'over_num', 'bat', 'team_bat', 'bowl_kind',
-            'batruns', 'out', 'year', 'bat_hand']
+USE_COLS = ['p_match', 'inns', 'over_num', 'bat', 'team_bat', 'team_bowl', 'bowl_kind',
+            'batruns', 'ballfaced', 'out', 'year', 'bat_hand']
+
+# Over Band Profile: runs per ball the batter scored in one over
+BANDS = ['Negative Play', 'Solidify', 'Par Hitting', 'Positive Impact', 'High Ceiling', 'Game Changer']
+BAND_RANGE = {'Negative Play': '1.00 or less', 'Solidify': '1.01 – 1.49', 'Par Hitting': '1.50 – 1.99',
+              'Positive Impact': '2.00 – 2.49', 'High Ceiling': '2.50 – 2.99', 'Game Changer': '3.00+'}
+BAND_COLORS = {'Negative Play': '#9AA3AE', 'Solidify': '#6FA8B8', 'Par Hitting': '#3D7A5F',
+               'Positive Impact': '#D29B3C', 'High Ceiling': '#E0662F', 'Game Changer': '#A4243B'}
+
+
+def band_of(rpb):
+    return np.select([rpb <= 1.0, rpb < 1.5, rpb < 2.0, rpb < 2.5, rpb < 3.0],
+                     BANDS[:5], default=BANDS[5])
 
 
 @st.cache_data(show_spinner="Loading deliveries…")
@@ -28,6 +41,8 @@ def load_data(source):
     df['team_bat'] = df['team_bat'].str.strip().str.replace('Royal Challengers Bengaluru', 'RCB')
     df['batruns'] = pd.to_numeric(df['batruns'], errors='coerce').fillna(0).astype(int)
     df['out'] = df['out'].astype(int)
+    df['ballfaced'] = pd.to_numeric(df['ballfaced'], errors='coerce').fillna(0).astype(int)
+    df['team_bowl'] = df['team_bowl'].str.strip()
     df['bowl_kind'] = df['bowl_kind'].fillna('mixture/unknown')
     df['phase'] = pd.cut(df['over'], bins=[0, 6, 16, 20], labels=PHASES)
     return df
@@ -66,8 +81,8 @@ if dff.empty:
     st.stop()
 
 over_data = dff.groupby(
-    ['p_match','inns','over','bat','team_bat','bowl_kind','phase'], observed=True
-).agg(over_runs=('batruns','sum'), balls=('batruns','count'), outs=('out','sum')).reset_index()
+    ['p_match','inns','over','bat','team_bat','team_bowl','year','bowl_kind','phase'], observed=True
+).agg(over_runs=('batruns','sum'), balls_faced=('ballfaced','sum'), outs=('out','sum')).reset_index()
 
 # ── Min overs batted (sidebar) ────────────────────────────────────────────────
 # An "over batted" = any over in which the batter faced at least one ball.
@@ -82,6 +97,13 @@ keep = bat_overs[bat_overs >= min_ov].index
 over_data = over_data[over_data['bat'].isin(keep)]
 st.caption(f"**{len(keep)}** batters with **{min_ov}+** overs batted")
 
+band_data = dff.groupby(['p_match','inns','over','bat'], observed=True).agg(
+    runs=('batruns','sum'), balls=('ballfaced','sum')).reset_index()
+band_data = band_data[band_data['balls'] > 0]          # ignore overs where he faced only wides
+ball_opts = list(range(1, int(band_data['balls'].max()) + 1))
+sel_balls = st.sidebar.multiselect("Balls faced in over (Over Band Profile only)", ball_opts,
+                                   default=ball_opts)
+
 run_thr = st.slider("Impact Over: Min runs in one over", 6, 20, 10)
 impact  = over_data[over_data['over_runs'] >= run_thr].copy()
 
@@ -90,7 +112,13 @@ if impact.empty:
 else:
     tot_ov = over_data.groupby('bat').agg(Total_Overs_Batted=('over_runs','count')).reset_index()
 
+    def add_balls(d):
+        d['Avg_Balls'] = (d['Total_Balls']/d['Impact_Overs']).round(1)
+        d['Runs_per_Ball'] = (d['Total_Runs']/d['Total_Balls']).round(2)
+        return d
+
     def add_freq(d):
+        d = add_balls(d)
         d = pd.merge(d, tot_ov, on='bat', how='left')
         d['Impact_Freq%'] = (d['Impact_Overs']/d['Total_Overs_Batted']*100).round(1)
         return d
@@ -98,7 +126,7 @@ else:
     st.markdown("### 🏆 Overall Leaderboard")
     overall = impact.groupby('bat').agg(
         Impact_Overs=('over_runs','count'), Total_Runs=('over_runs','sum'),
-        Best_Over=('over_runs','max'), Avg_Runs=('over_runs','mean')
+        Best_Over=('over_runs','max'), Total_Balls=('balls_faced','sum'), Avg_Runs=('over_runs','mean')
     ).reset_index().sort_values('Impact_Overs',ascending=False).reset_index(drop=True)
     overall = add_freq(overall); overall['Avg_Runs'] = overall['Avg_Runs'].round(1); overall.index += 1
 
@@ -110,7 +138,7 @@ else:
         fig.update_layout(xaxis_tickangle=-40)
         st.plotly_chart(fig, width="stretch")
     with c2:
-        st.dataframe(overall[['bat','Impact_Overs','Total_Overs_Batted','Impact_Freq%','Total_Runs','Best_Over','Avg_Runs']],
+        st.dataframe(overall[['bat','Impact_Overs','Total_Overs_Batted','Impact_Freq%','Total_Runs','Best_Over','Avg_Runs','Avg_Balls','Runs_per_Ball']],
                      width="stretch", height=380)
 
     st.divider()
@@ -123,7 +151,7 @@ else:
         fig_f.update_layout(xaxis_tickangle=-40)
         st.plotly_chart(fig_f, width="stretch")
     with cf2:
-        st.dataframe(freq_df[['bat','Impact_Freq%','Impact_Overs','Total_Overs_Batted','Total_Runs','Best_Over','Avg_Runs']],
+        st.dataframe(freq_df[['bat','Impact_Freq%','Impact_Overs','Total_Overs_Batted','Total_Runs','Best_Over','Avg_Runs','Avg_Balls','Runs_per_Ball']],
                      width="stretch", height=380)
 
     st.divider()
@@ -135,7 +163,7 @@ else:
     ]:
         with col:
             lb = impact[impact['bowl_kind']==kind].groupby('bat').agg(
-                Impact_Overs=('over_runs','count'), Total_Runs=('over_runs','sum'), Best_Over=('over_runs','max')
+                Impact_Overs=('over_runs','count'), Total_Runs=('over_runs','sum'), Best_Over=('over_runs','max'), Total_Balls=('balls_faced','sum')
             ).reset_index().sort_values('Impact_Overs',ascending=False).reset_index(drop=True)
             lb = add_freq(lb); lb.index += 1
             fig_k = px.bar(lb.head(10), x='bat', y='Impact_Overs',
@@ -143,7 +171,7 @@ else:
                            text='Impact_Overs', title=f"Top 10 {title}", height=360)
             fig_k.update_layout(xaxis_tickangle=-40)
             st.plotly_chart(fig_k, width="stretch")
-            st.dataframe(lb[['bat','Impact_Overs','Total_Overs_Batted','Impact_Freq%','Total_Runs','Best_Over']], width="stretch")
+            st.dataframe(lb[['bat','Impact_Overs','Total_Overs_Batted','Impact_Freq%','Total_Runs','Best_Over','Avg_Balls','Runs_per_Ball']], width="stretch")
 
     st.divider()
     st.markdown("### 📊 By Phase")
@@ -153,11 +181,11 @@ else:
             Total_Overs_Batted=('over_runs','count')).reset_index()
         ph_lb = impact[impact['phase'].astype(str)==ph_n].groupby('bat').agg(
             Impact_Overs=('over_runs','count'), Total_Runs=('over_runs','sum'),
-            Best_Over=('over_runs','max'), Avg_Runs=('over_runs','mean')
+            Best_Over=('over_runs','max'), Total_Balls=('balls_faced','sum'), Avg_Runs=('over_runs','mean')
         ).reset_index().sort_values('Impact_Overs',ascending=False).reset_index(drop=True)
         ph_lb = pd.merge(ph_lb, ph_tot, on='bat', how='left')
         ph_lb['Impact_Freq%'] = (ph_lb['Impact_Overs']/ph_lb['Total_Overs_Batted']*100).round(1)
-        ph_lb['Avg_Runs'] = ph_lb['Avg_Runs'].round(1)
+        ph_lb['Avg_Runs'] = ph_lb['Avg_Runs'].round(1); ph_lb = add_balls(ph_lb)
         ca,cb,cc = st.columns(3)
         with ca:
             fig_a = px.bar(ph_lb.head(15), x='bat', y='Impact_Overs',
@@ -174,7 +202,7 @@ else:
             st.plotly_chart(fig_b, width="stretch")
         with cc:
             ph_lb.index = ph_lb.index + 1
-            st.dataframe(ph_lb[['bat','Impact_Overs','Total_Overs_Batted','Impact_Freq%','Total_Runs','Best_Over','Avg_Runs']],
+            st.dataframe(ph_lb[['bat','Impact_Overs','Total_Overs_Batted','Impact_Freq%','Total_Runs','Best_Over','Avg_Runs','Avg_Balls','Runs_per_Ball']],
                          width="stretch", height=320)
 
     st.divider()
@@ -188,11 +216,11 @@ else:
             Total_Times_Batted=('over_runs','count')).reset_index()
         ov_lb = ov_f.groupby('bat').agg(
             Impact_Overs=('over_runs','count'), Total_Runs=('over_runs','sum'),
-            Best_Over=('over_runs','max'), Avg_Runs=('over_runs','mean')
+            Best_Over=('over_runs','max'), Total_Balls=('balls_faced','sum'), Avg_Runs=('over_runs','mean')
         ).reset_index()
         ov_lb = pd.merge(ov_lb, ov_tot, on='bat', how='left')
         ov_lb['Impact_Freq%'] = (ov_lb['Impact_Overs']/ov_lb['Total_Times_Batted']*100).round(1)
-        ov_lb['Avg_Runs'] = ov_lb['Avg_Runs'].round(1)
+        ov_lb['Avg_Runs'] = ov_lb['Avg_Runs'].round(1); ov_lb = add_balls(ov_lb)
         ov_lb = ov_lb.sort_values('Impact_Overs',ascending=False).reset_index(drop=True); ov_lb.index += 1
         co1,co2 = st.columns([1.2,1])
         with co1:
@@ -208,7 +236,7 @@ else:
                             title=f"Over {sel_ov} – Impact Freq%", height=380)
             fig_o2.update_layout(xaxis_tickangle=-40)
             st.plotly_chart(fig_o2, width="stretch")
-        st.dataframe(ov_lb[['bat','Impact_Overs','Total_Times_Batted','Impact_Freq%','Total_Runs','Best_Over','Avg_Runs']],
+        st.dataframe(ov_lb[['bat','Impact_Overs','Total_Times_Batted','Impact_Freq%','Total_Runs','Best_Over','Avg_Runs','Avg_Balls','Runs_per_Ball']],
                      width="stretch")
 
     st.divider()
@@ -223,6 +251,45 @@ else:
     g1.metric("Impact Overs", len(bi)); g2.metric("Total Overs", bi_tot)
     g3.metric("Impact Freq%", f"{bi_freq:.1f}%"); g4.metric("Best Over", int(bi['over_runs'].max()))
     g5.metric("Avg in Impact Over", f"{bi_avg:.1f}"); g6.metric("Total Runs", int(bi['over_runs'].sum()))
+
+    bi_balls = bi['balls_faced'].sum()
+    h1,h2,_,_,_,_ = st.columns(6)
+    h1.metric("Avg Balls per Impact Over", f"{bi_balls/len(bi):.1f}")
+    h2.metric("Runs per Ball in Impact Overs", f"{bi['over_runs'].sum()/bi_balls:.2f}" if bi_balls else "–")
+
+    st.markdown("#### 📋 Every Impact Over")
+    ev = bi.sort_values(['year','p_match','over'])[['year','team_bowl','over','over_runs','balls_faced']].copy()
+    ev['Runs_per_Ball'] = (ev['over_runs']/ev['balls_faced'].where(ev['balls_faced']>0)).round(2)
+    ev.columns = ['Year','vs','Over','Runs','Balls','Runs_per_Ball']
+    st.dataframe(ev, hide_index=True, width="stretch", height=260)
+
+    # ── Over Band Profile ────────────────────────────────────────────────────
+    st.markdown("#### 🎚️ Over Band Profile")
+    bb = band_data[(band_data['bat']==sel_gc) & band_data['balls'].isin(sel_balls)].copy()
+    if bb.empty:
+        st.info("No overs for this batter with the selected balls-faced counts.")
+    else:
+        bb['Band'] = pd.Categorical(band_of(bb['runs']/bb['balls']), categories=BANDS, ordered=True)
+        bt = bb.groupby('Band', observed=False).agg(
+            Overs=('runs','count'), Runs=('runs','sum'), Balls=('balls','sum')).reset_index()
+        bt['% of Overs'] = (bt['Overs']/bt['Overs'].sum()*100).round(1)
+        bt['Runs_per_Ball'] = (bt['Runs']/bt['Balls'].where(bt['Balls']>0)).round(2)
+        bt.insert(1, 'Runs per ball range', bt['Band'].astype(str).map(BAND_RANGE))
+        st.caption(f"All {len(bb)} overs {sel_gc} batted in (not just Impact Overs), classified by runs per ball "
+                   f"in that over. Balls faced in over: {', '.join(map(str, sel_balls))}. "
+                   "Wides excluded, no-balls counted.")
+        cb1, cb2 = st.columns([1, 1.3])
+        with cb1:
+            fig_band = px.bar(bt, x='% of Overs', y='Band', orientation='h', color='Band',
+                              color_discrete_map=BAND_COLORS, text='% of Overs',
+                              category_orders={'Band': BANDS}, height=320,
+                              title=f"{sel_gc} – Share of Overs by Band")
+            fig_band.update_traces(texttemplate='%{text:.1f}%')
+            fig_band.update_layout(showlegend=False)
+            st.plotly_chart(fig_band, width="stretch")
+        with cb2:
+            st.dataframe(bt[['Band','Runs per ball range','Overs','% of Overs','Runs','Balls','Runs_per_Ball']],
+                         hide_index=True, width="stretch", height=320)
 
     # Consecutive
     st.markdown("#### 🔥 Consecutive Impact Overs")
