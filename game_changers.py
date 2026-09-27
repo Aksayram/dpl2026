@@ -69,6 +69,19 @@ over_data = dff.groupby(
     ['p_match','inns','over','bat','team_bat','bowl_kind','phase'], observed=True
 ).agg(over_runs=('batruns','sum'), balls=('batruns','count'), outs=('out','sum')).reset_index()
 
+# ── Min overs batted (sidebar) ────────────────────────────────────────────────
+# An "over batted" = any over in which the batter faced at least one ball.
+bat_overs = over_data.groupby('bat').size()
+max_ov = int(bat_overs.max())
+if max_ov > 1:
+    min_ov = st.sidebar.slider("Min overs batted", 1, max_ov, 1,
+                               help="Only show batters who batted in at least this many overs")
+else:
+    min_ov = 1
+keep = bat_overs[bat_overs >= min_ov].index
+over_data = over_data[over_data['bat'].isin(keep)]
+st.caption(f"**{len(keep)}** batters with **{min_ov}+** overs batted")
+
 run_thr = st.slider("Impact Over: Min runs in one over", 6, 20, 10)
 impact  = over_data[over_data['over_runs'] >= run_thr].copy()
 
