@@ -73,7 +73,8 @@ def build_post_wicket(df, n):
     """
     d = df.sort_values(['p_match', 'inns', 'over', 'ball'])
     legal = ((d['wide'] == 0) & (d['noball'] == 0)).astype(int)
-    d = d.assign(_row=d.index, _leg=legal.groupby([d['p_match'], d['inns']]).cumsum())
+    d = d.assign(_row=d.index, _leg=legal.groupby([d['p_match'], d['inns']]).cumsum(),
+                 _leg_ov=legal.groupby([d['p_match'], d['inns'], d['over']]).cumsum(), _legal=legal)
 
     recs, members = [], []
 
@@ -85,16 +86,22 @@ def build_post_wicket(df, n):
     for (pm, inn), g in d.groupby(['p_match', 'inns'], sort=False):
         rows = g['_row'].to_numpy(); strk = g['p_bat'].to_numpy(); leg = g['_leg'].to_numpy()
         outs = g['out'].to_numpy(); pout = g['p_out'].to_numpy(); bf = g['ballfaced'].to_numpy()
+        dism = g['dismissal'].to_numpy(); legal_k = g['_legal'].to_numpy(); leg_ov = g['_leg_ov'].to_numpy()
         team, year = g['team_bat'].iat[0], g['year'].iat[0]
         ov_lbl = (g['over'] - 1).astype(str).to_numpy()
 
         # crease slots: each slot is one batter; id is None until he faces a ball
         crease, slot_of_row, wickets = [], [], []
+        expect = None      # which unseen batter should face next (strike rules after a wicket)
         for k in range(len(g)):
             s = strk[k]
             slot = next((c for c in crease if c['id'] == s), None)
             if slot is None:
-                slot = next((c for c in crease if c['id'] is None), None)   # oldest unseen batter
+                if expect is not None and expect in crease and expect['id'] is None:
+                    slot = expect                                            # decided by strike rules
+                else:
+                    slot = next((c for c in crease if c['id'] is None), None)   # oldest unseen batter
+                expect = None
                 if slot is None:
                     slot = {'id': None}
                     if len(crease) >= 2:           # data gap: drop the least recent occupant
@@ -113,7 +120,20 @@ def build_post_wicket(df, n):
                 survivors = list(crease)
                 new_slot = {'id': None}
                 crease.append(new_slot)
+                uncertain = False
+                if any(c['id'] is None for c in survivors):
+                    # the other batter hasn't faced yet, so two batters are still unseen.
+                    # IPL 2023-24: the new batter takes strike, unless the wicket fell on the
+                    # last ball of the over (then the other batter faces next). Run-outs can't
+                    # be resolved this way (we don't know which end the new batter went to).
+                    if dism[k] == 'run out':
+                        uncertain = True
+                    elif legal_k[k] == 1 and leg_ov[k] >= 6:
+                        expect = next(c for c in survivors if c['id'] is None)
+                    else:
+                        expect = new_slot
                 wickets.append({'k': k, 'leg': leg[k], 'survivors': survivors, 'new': new_slot,
+                                'uncertain': uncertain,
                                 'label': f"{ov_lbl[k]}.{int(g['ball'].iat[k])}"})
 
         if not wickets:
@@ -148,19 +168,19 @@ def build_post_wicket(df, n):
             seen_in_event = set()
             for w in e['wk']:
                 # new batter: his own first n balls
-                rid = add_rec(role='new', slot=w['new'], wicket=w['label'], **base)
+                rid = add_rec(role='new', slot=w['new'], wicket=w['label'], uncertain=w['uncertain'], **base)
                 members += [(rid, r) for r in rows_of(w['new'], w['k'], max_balls=n)]
                 for sv in w['survivors']:
                     sid = id(sv)
                     if sid not in overall_done:     # overall: from first wicket he survives to the end
                         overall_done.add(sid)
-                        rid = add_rec(role='nd_overall', slot=sv, wicket=w['label'], **base)
+                        rid = add_rec(role='nd_overall', slot=sv, wicket=w['label'], uncertain=w['uncertain'], **base)
                         members += [(rid, r) for r in rows_of(sv, w['k'])]
                         rid = add_rec(role='before', link=rid, slot=sv, **base)
                         members += [(rid, r) for r in rows_of(sv, w['k'] + 1, max_balls=n, before=True)]
                     if sid not in seen_in_event:    # event: from first wicket he survives in it
                         seen_in_event.add(sid)
-                        rid = add_rec(role='nd_event', slot=sv, wicket=w['label'],
+                        rid = add_rec(role='nd_event', slot=sv, wicket=w['label'], uncertain=w['uncertain'],
                                       event=f"{pm}-{inn}-{ei}", size=e['size'], **base)
                         members += [(rid, r) for r in rows_of(sv, w['k'], stop_leg=e['end_leg'])]
                         rid = add_rec(role='before', link=rid, slot=sv, **base)
@@ -553,6 +573,8 @@ with mc3:
     R = post_wicket_totals(df, recs, mem, dff.index)
     names = df.drop_duplicates('p_bat').set_index('p_bat')['bat']
     R['bat'] = R['p_bat'].map(names)
+    unsure = R[R['uncertain'] == True]
+    R = R[R['uncertain'] != True]
     new_r  = R[R['role']=='new']
     ovr_r  = R[R['role']=='nd_overall']
     evt_r  = R[R['role']=='nd_event'].copy()
@@ -563,6 +585,13 @@ with mc3:
     def sr(r, b):
         return (r / b.where(b > 0) * 100).round(1)
 
+    if not unsure.empty:
+        with st.expander(f"⚠️ {unsure['wicket'].count()} records left out: run-outs where it can't be told who walked in"):
+            st.caption("The other batter hadn't faced a ball yet when the run-out happened, and the data "
+                       "doesn't record the non-striker, so these records are not counted anywhere below.")
+            st.dataframe(unsure[['year','team_bat','p_match','inns','wicket','role','bat']].rename(columns={
+                'year':'Year','team_bat':'Team','p_match':'Match','inns':'Inns','wicket':'Wicket at',
+                'role':'Record','bat':'Batter as recorded'}), hide_index=True, width="stretch")
     k1,k2,k3,k4 = st.columns(4)
     k1.metric("Wickets (new batters)", len(new_r))
     for col, ev in zip([k2,k3,k4], EVENTS):
