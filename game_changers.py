@@ -240,6 +240,52 @@ else:
                      width="stretch")
 
     st.divider()
+    st.markdown("### 🎚️ Over Band Leaderboard")
+    st.caption("Every over a batter batted in, classified by runs per ball in that over. "
+               "Uses the 'Balls faced in over' filter in the sidebar. Wides excluded, no-balls counted.")
+
+    lb_src = band_data[band_data['bat'].isin(keep) & band_data['balls'].isin(sel_balls)].copy()
+    if lb_src.empty:
+        st.info("No overs match the selected balls-faced counts.")
+    else:
+        lb_src['Band'] = band_of(lb_src['runs']/lb_src['balls'])
+        sel_band = st.selectbox("Band", BANDS, index=len(BANDS)-1, key='band_pick',
+                                format_func=lambda b: f"{b}  ({BAND_RANGE[b]} runs per ball)")
+
+        per_bat = lb_src.groupby('bat').agg(Overs_Counted=('runs','count')).reset_index()
+        in_band = lb_src[lb_src['Band']==sel_band].groupby('bat').agg(
+            Band_Overs=('runs','count'), Band_Runs=('runs','sum'), Band_Balls=('balls','sum')).reset_index()
+        band_lb = per_bat.merge(in_band, on='bat', how='left').fillna(
+            {'Band_Overs': 0, 'Band_Runs': 0, 'Band_Balls': 0})
+        band_lb[['Band_Overs','Band_Runs','Band_Balls']] = band_lb[['Band_Overs','Band_Runs','Band_Balls']].astype(int)
+
+        lo, hi = int(band_lb['Overs_Counted'].min()), int(band_lb['Overs_Counted'].max())
+        if hi > lo:
+            ov_lo, ov_hi = st.slider("Overs range (Overs Counted)", lo, hi, (lo, hi), key='band_range')
+        else:
+            ov_lo, ov_hi = lo, hi
+        band_lb = band_lb[band_lb['Overs_Counted'].between(ov_lo, ov_hi)]
+
+        band_lb['Band_%'] = (band_lb['Band_Overs']/band_lb['Overs_Counted']*100).round(1)
+        band_lb['Runs_per_Ball'] = (band_lb['Band_Runs']/band_lb['Band_Balls'].where(band_lb['Band_Balls']>0)).round(2)
+        band_lb = band_lb.sort_values(['Band_%','Band_Overs'], ascending=False).reset_index(drop=True)
+        band_lb.index += 1
+
+        st.caption(f"**{len(band_lb)}** batters with **{ov_lo}–{ov_hi}** Overs Counted")
+        bl1, bl2 = st.columns([1.2, 1])
+        with bl1:
+            fig_bl = px.bar(band_lb.head(15), x='bat', y='Band_%', text='Band_%',
+                            color_discrete_sequence=[BAND_COLORS[sel_band]],
+                            hover_data={'Band_Overs': True, 'Overs_Counted': True},
+                            title=f"Highest {sel_band} % (top 15)", height=400)
+            fig_bl.update_traces(texttemplate='%{text:.1f}%')
+            fig_bl.update_layout(xaxis_tickangle=-40)
+            st.plotly_chart(fig_bl, width="stretch")
+        with bl2:
+            st.dataframe(band_lb[['bat','Band_%','Band_Overs','Overs_Counted','Runs_per_Ball']],
+                         width="stretch", height=400)
+
+    st.divider()
     st.markdown("### 🔍 Individual Batter Profile")
     sel_gc = st.selectbox("Select Batter", sorted(impact['bat'].unique()), key='gc_bat')
     bi     = impact[impact['bat']==sel_gc]
