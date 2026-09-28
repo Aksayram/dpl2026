@@ -149,24 +149,29 @@ with tab1:
             pg = pg[pg['Balls'] >= min_balls].copy()
             pg['Avg'] = (pg['Runs'] / pg['Wickets'].replace(0, np.nan)).round(1)
             pg['SR'] = pg['Balls_per_Wkt']
+            pg['Wickets_per_Ball'] = (pg['Wickets'] / pg['Balls']).round(3)
             pg['PEI'] = ((pg['Wickets'] / pg['Balls'] * 6) / pg['Economy'].replace(0, np.nan)).round(3).fillna(0)
             pg = pg.sort_values('PEI', ascending=False).reset_index(drop=True)
             pg.index += 1
 
-            rank_by = st.radio("Rank by", ['PEI', 'Economy', 'Wickets', 'Dot%', 'SR'], horizontal=True, key='pei_rank')
-            asc = rank_by in ['Economy', 'SR']
+            rank_by = st.radio("Rank by", ['PEI', 'Runs_per_Ball', 'Wickets_per_Ball', 'Economy', 'Wickets',
+                                           'Dot%', 'SR'], horizontal=True, key='pei_rank',
+                               format_func=lambda m: m.replace('_', ' '))
+            asc = rank_by in ['Economy', 'SR', 'Runs_per_Ball']
             c1, c2 = st.columns([1.2, 1])
             with c1:
                 top = pg.dropna(subset=[rank_by])
                 top = top.nsmallest(15, rank_by) if asc else top.nlargest(15, rank_by)
                 fig = px.bar(top, x='bowl', y=rank_by, color=rank_by, text=rank_by,
                              color_continuous_scale='RdYlGn_r' if asc else 'RdYlGn',
-                             title=f"Top 15 – {rank_by} at {lo_lbl} to {hi_lbl} km/h", height=420)
+                             title=f"Top 15 – {rank_by.replace('_', ' ')} at {lo_lbl} to {hi_lbl} km/h", height=420)
                 fig.update_layout(xaxis_tickangle=-40)
                 st.plotly_chart(fig, width="stretch")
             with c2:
-                st.dataframe(pg[['bowl', 'Type', 'Balls', 'Runs', 'Economy', 'Wickets', 'SR', 'Dot%', 'PEI']],
-                             width="stretch", height=400)
+                st.dataframe(pg[['bowl', 'Type', 'Balls', 'Runs', 'Runs_per_Ball', 'Economy', 'Wickets',
+                                 'Wickets_per_Ball', 'SR', 'Dot%', 'PEI']],
+                             width="stretch", height=400,
+                             column_config={'Wickets_per_Ball': st.column_config.NumberColumn(format="%.3f")})
 
             if not pg.empty:
                 fig2 = px.scatter(pg, x='Economy', y='Wickets', size='Balls', color='PEI', text='bowl',
